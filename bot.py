@@ -6,10 +6,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ContextTypes, ConversationHandler, filters
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, ConversationHandler, filters
 
 from db import DB
 
@@ -29,8 +26,9 @@ log = logging.getLogger("veltro-bot")
  BTN_LAYOUT, SCHED_TYPE, SCHED_TIME, SCHED_DAYS) = range(11)
 
 MAIN = ReplyKeyboardMarkup([
-    ["➕ 게시물 등록", "📋 예약 게시물"],
-    ["📣 테스트 발송", "🔄 새로고침"]
+    ["✉️ 메시지 전송", "➕ 게시물 등록"],
+    ["📋 예약 게시물", "📣 테스트 발송"],
+    ["🔄 새로고침"]
 ], resize_keyboard=True)
 
 
@@ -59,22 +57,32 @@ def keyboard(buttons, columns=2):
     return InlineKeyboardMarkup(rows)
 
 
-async def send_post(context: ContextTypes.DEFAULT_TYPE, post):
-    markup = keyboard(json.loads(post["buttons_json"] or "[]"), post["button_columns"])
-    if post["photo_file_id"]:
+async def send_content(context: ContextTypes.DEFAULT_TYPE, body: str, photo_file_id=None, buttons=None, button_columns=2):
+    markup = keyboard(buttons or [], button_columns)
+    if photo_file_id:
         await context.bot.send_photo(
             chat_id=TARGET_CHAT_ID,
-            photo=post["photo_file_id"],
-            caption=post["body"],
+            photo=photo_file_id,
+            caption=body,
             reply_markup=markup,
         )
     else:
         await context.bot.send_message(
             chat_id=TARGET_CHAT_ID,
-            text=post["body"],
+            text=body,
             reply_markup=markup,
             disable_web_page_preview=True,
         )
+
+
+async def send_post(context: ContextTypes.DEFAULT_TYPE, post):
+    await send_content(
+        context=context,
+        body=post["body"],
+        photo_file_id=post["photo_file_id"],
+        buttons=json.loads(post["buttons_json"] or "[]"),
+        button_columns=post["button_columns"],
+    )
 
 
 async def scheduled_send(context: ContextTypes.DEFAULT_TYPE):
@@ -133,11 +141,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 VELTRO 게시관리 봇\n\n원하는 메뉴를 선택해주세요.", reply_markup=MAIN)
 
 
+async def quick_send_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_ok(update):
+        await deny(update)
+        return ConversationHandler.END
+    context.user_data["draft"] = {"buttons": [], "quick_send": True, "title": "즉시 메시지"}
+    await update.message.reply_text("그룹에 바로 전송할 메시지를 입력해주세요.", reply_markup=ReplyKeyboardRemove())
+    return BODY
+
+
 async def new_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_ok(update):
         await deny(update)
         return ConversationHandler.END
-    context.user_data["draft"] = {"buttons": []}
+    context.user_data["draft"] = {"buttons": [], "quick_send": False}
     await update.message.reply_text("게시물 관리용 제목을 입력해주세요.\n예: 아침 브리핑", reply_markup=ReplyKeyboardRemove())
     return TITLE
 
@@ -150,7 +167,10 @@ async def set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["draft"]["body"] = update.message.text
-    await update.message.reply_text("이미지를 함께 올릴까요?", reply_markup=ReplyKeyboardMarkup([["이미지 사용", "텍스트만"]], resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text(
+        "이미지를 함께 올릴까요?",
+        reply_markup=ReplyKeyboardMarkup([["이미지 사용", "텍스트만"]], resize_keyboard=True, one_time_keyboard=True),
+    )
     return MEDIA_CHOICE
 
 
@@ -168,7 +188,10 @@ async def media_wait(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ask_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("URL 버튼을 추가하시겠습니까?", reply_markup=ReplyKeyboardMarkup([["➕ 버튼 추가", "버튼 완료"]], resize_keyboard=True))
+    await update.message.reply_text(
+        "URL 버튼을 추가하시겠습니까?",
+        reply_markup=ReplyKeyboardMarkup([["➕ 버튼 추가", "버튼 완료"]], resize_keyboard=True),
+    )
     return BTN_DECIDE
 
 
@@ -177,7 +200,10 @@ async def button_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("버튼 이름을 입력해주세요.", reply_markup=ReplyKeyboardRemove())
         return BTN_LABEL
     if update.message.text == "버튼 완료":
-        await update.message.reply_text("버튼 배치를 선택해주세요.", reply_markup=ReplyKeyboardMarkup([["한 줄 1개", "한 줄 2개"]], resize_keyboard=True, one_time_keyboard=True))
+        await update.message.reply_text(
+            "버튼 배치를 선택해주세요.",
+            reply_markup=ReplyKeyboardMarkup([["한 줄 1개", "한 줄 2개"]], resize_keyboard=True, one_time_keyboard=True),
+        )
         return BTN_LAYOUT
     await update.message.reply_text("아래 버튼 중 하나를 선택해주세요.")
     return BTN_DECIDE
@@ -199,8 +225,29 @@ async def button_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["draft"]["button_columns"] = 1 if "1개" in update.message.text else 2
-    await update.message.reply_text("반복 방식을 선택해주세요.", reply_markup=ReplyKeyboardMarkup([["1회", "매일"], ["평일", "특정 요일"]], resize_keyboard=True, one_time_keyboard=True))
+    draft = context.user_data["draft"]
+    draft["button_columns"] = 1 if "1개" in update.message.text else 2
+
+    if draft.get("quick_send"):
+        try:
+            await send_content(
+                context=context,
+                body=draft["body"],
+                photo_file_id=draft.get("photo_file_id"),
+                buttons=draft["buttons"],
+                button_columns=draft["button_columns"],
+            )
+            context.user_data.pop("draft", None)
+            await update.message.reply_text("✅ VELTRO 그룹에 메시지를 바로 전송했습니다.", reply_markup=MAIN)
+        except Exception:
+            log.exception("quick send failed")
+            await update.message.reply_text("❌ 메시지 전송에 실패했습니다.\n봇의 그룹 관리자 권한을 확인해주세요.", reply_markup=MAIN)
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "반복 방식을 선택해주세요.",
+        reply_markup=ReplyKeyboardMarkup([["1회", "매일"], ["평일", "특정 요일"]], resize_keyboard=True, one_time_keyboard=True),
+    )
     return SCHED_TYPE
 
 
@@ -243,20 +290,30 @@ async def sched_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data["draft"]
     post_id = db.create_post(
-        title=d["title"], body=d["body"], photo_file_id=d.get("photo_file_id"),
-        buttons_json=json.dumps(d["buttons"], ensure_ascii=False), button_columns=d["button_columns"],
-        schedule_type=d["schedule_type"], schedule_time=d["schedule_time"], weekdays=d.get("weekdays"), enabled=1,
+        title=d["title"],
+        body=d["body"],
+        photo_file_id=d.get("photo_file_id"),
+        buttons_json=json.dumps(d["buttons"], ensure_ascii=False),
+        button_columns=d["button_columns"],
+        schedule_type=d["schedule_type"],
+        schedule_time=d["schedule_time"],
+        weekdays=d.get("weekdays"),
+        enabled=1,
     )
     post = db.get_post(post_id)
     schedule(context.application, post)
     context.user_data.pop("draft", None)
-    await update.message.reply_text(f"✅ 게시물 #{post_id} 저장 완료\n제목: {post['title']}\n시간: {post['schedule_time']}", reply_markup=MAIN)
+    await update.message.reply_text(
+        f"✅ 게시물 #{post_id} 저장 완료\n제목: {post['title']}\n시간: {post['schedule_time']}",
+        reply_markup=MAIN,
+    )
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("draft", None)
-    await update.message.reply_text("등록을 취소했습니다.", reply_markup=MAIN)
+    context.user_data.pop("button_label", None)
+    await update.message.reply_text("등록/전송을 취소했습니다.", reply_markup=MAIN)
     return ConversationHandler.END
 
 
@@ -274,7 +331,10 @@ async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏯ ON/OFF", callback_data=f"toggle:{p['id']}"),
             InlineKeyboardButton("🗑 삭제", callback_data=f"delete:{p['id']}")
         ]])
-        await update.message.reply_text(f"{state} #{p['id']} {p['title']}\n⏰ {p['schedule_time']} · {repeat}", reply_markup=kb)
+        await update.message.reply_text(
+            f"{state} #{p['id']} {p['title']}\n⏰ {p['schedule_time']} · {repeat}",
+            reply_markup=kb,
+        )
 
 
 async def test_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -283,7 +343,10 @@ async def test_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     posts = db.list_posts()
     if not posts:
         return await update.message.reply_text("테스트할 게시물이 없습니다.")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"#{p['id']} {p['title']}", callback_data=f"test:{p['id']}")] for p in posts[:20]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"#{p['id']} {p['title']}", callback_data=f"test:{p['id']}")]
+        for p in posts[:20]
+    ])
     await update.message.reply_text("즉시 테스트 발송할 게시물을 선택해주세요.", reply_markup=kb)
 
 
@@ -297,6 +360,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = db.get_post(post_id)
     if not post:
         return await q.edit_message_text("이미 삭제된 게시물입니다.")
+
     if action == "test":
         try:
             await send_post(context, post)
@@ -308,7 +372,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         enabled = db.toggle_post(post_id)
         post = db.get_post(post_id)
         schedule(context.application, post)
-        await q.edit_message_text(f"{'🟢 활성' if enabled else '⏸ 중지'} #{post_id} {post['title']}\n⏰ {post['schedule_time']} · {post['schedule_type']}")
+        await q.edit_message_text(
+            f"{'🟢 활성' if enabled else '⏸ 중지'} #{post_id} {post['title']}\n⏰ {post['schedule_time']} · {post['schedule_type']}"
+        )
     elif action == "delete":
         clear_jobs(context.application, post_id)
         db.delete_post(post_id)
@@ -336,7 +402,10 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(r"^➕ 게시물 등록$"), new_post)],
+        entry_points=[
+            MessageHandler(filters.Regex(r"^✉️ 메시지 전송$"), quick_send_start),
+            MessageHandler(filters.Regex(r"^➕ 게시물 등록$"), new_post),
+        ],
         states={
             TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_title)],
             BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_body)],
@@ -352,6 +421,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.Regex(r"^📋 예약 게시물$"), list_posts))
